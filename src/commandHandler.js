@@ -1,18 +1,44 @@
-export function handleCommand(client, message) {
-  const content = message.content.trim();
-  const prefix = client.prefix;
+export async function handleCommand(client, message) {
+  try {
+    const content = message.content?.trim();
+    const prefix = client.prefix;
 
-  if (!content.startsWith(prefix)) return;
+    if (!content?.startsWith(prefix)) return;
 
-  const args = content.slice(prefix.length).split(/ +/);
-  const commandName = args.shift().toLowerCase();
+    const args = content.slice(prefix.length).split(/\s+/);
+    const commandName = args.shift().toLowerCase();
 
-  const command = client.commands.get(`${prefix}${commandName}`);
-  if (!command) return;
+    const command =
+      client.commands.get(`${prefix}${commandName}`) ||
+      client.commands.get(commandName);
 
-  const reply = async (text) => {
-    await client.sendMessage(message.channel_id, text);
-  };
+    if (!command) return;
 
-  command({ message, args, reply, client });
+    const reply = async (text) => {
+      if (!text) return;
+      await client.sendMessage(message.channel_id, text);
+    };
+
+    const embed = async ({ title, description }) => {
+      await client.sendMessage(message.channel_id, {
+        embeds: [
+          {
+            title,
+            description,
+            color: 0x5865f2, // Discord blurple
+          },
+        ],
+      });
+    };
+
+    await command({
+      message,
+      args,
+      reply,
+      embed,
+      client,
+    });
+  } catch (err) {
+    console.error("[Jscord] Command handler error:", err);
+  }
 }
