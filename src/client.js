@@ -3,37 +3,66 @@ import fetch from "node-fetch";
 import { handleCommand } from "./commandHandler.js";
 
 export class Client {
-  constructor(token) {
+  constructor(token, options = {}) {
+    if (!token) throw new Error("Missing bot token.");
+
     this.token = token;
+    this.intents = options.intents || 513; // GUILDS + GUILD_MESSAGES
     this.ws = null;
-    this.heartbeatInterval = null;
     this.sequence = null;
     this.sessionId = null;
+    this.heartbeatInterval = null;
     this.commands = new Map();
+    this.events = new Map();
+    this.reconnectDelay = 5000;
   }
 
+  on(event, fn) {
+    if (!this.events.has(event)) this.events.set(event, []);
+    this.events.get(event).push(fn);
+  }
+
+  emit(event, ...args) {
+    const listeners = this.events.get(event);
+    if (listeners) {
+      for (const fn of listeners) {
+        try {
+          fn(...args);
+        } catch (err) {
+          console.error(`[JSCORD] ⚠️ Event '${event}' error:`, err);
+        }
+      }
+    }
+  }
+  
   command(name, fn) {
     this.commands.set(name, fn);
   }
 
   async login() {
     try {
-      const gateway = await fetch("https://discord.com/api/v10/gateway/bot", {
+      const res = await fetch("https://discord.com/api/v10/gateway/bot", {
         headers: { Authorization: `Bot ${this.token}` },
-      }).then((res) => res.json());
+      });
+      const gateway = await res.json();
 
       if (!gateway.url) throw new Error("Failed to fetch gateway URL");
 
       this.ws = new WebSocket(`${gateway.url}?v=10&encoding=json`);
-      this.ws.on("open", () => console.log("[JSCORD] ✅ Connected to Gateway"));
+      this.ws.on("open", () => this._onOpen());
       this.ws.on("message", (msg) => this._onMessage(msg));
       this.ws.on("close", (code) => this._onClose(code));
       this.ws.on("error", (err) =>
-        console.error("[JSCORD] ❌ WebSocket Error:", err)
+        console.error("[JSCORD] ❌ WebSocket error:", err.message)
       );
     } catch (err) {
       console.error("[JSCORD] Login failed:", err.message);
+      setTimeout(() => this.login(), this.reconnectDelay);
     }
+  }
+
+  _onOpen() {
+    console.log("[JSCORD] ✅ Connected to Gateway");
   }
 
   _onMessage(message) {
@@ -44,35 +73,39 @@ export class Client {
       return;
     }
 
-    const { t, s, op, d } = payload;
+    const { t: event, s, op, d } = payload;
     if (s) this.sequence = s;
 
     switch (op) {
       case 10: // Hello
-        console.log("[JSCORD] 🔁 Received HELLO from gateway");
         this._startHeartbeat(d.heartbeat_interval);
         this._identify();
         break;
-
       case 11: // Heartbeat ACK
-        // Pong response
         break;
-
-      case 1: // Heartbeat request from Discord
+      case 1: // Heartbeat request
         this._sendHeartbeat();
         break;
     }
 
-    if (t === "READY") {
+    if (event === "READY") {
       this.sessionId = d.session_id;
       console.log(
         `[JSCORD] 🟢 Logged in as ${d.user.username}#${d.user.discriminator}`
       );
+      this.emit("ready", d.user);
     }
 
-    if (t === "MESSAGE_CREATE") {
+    if (event === "MESSAGE_CREATE") {
+      this.emit("messageCreate", d);
       handleCommand(this, d);
     }
+  }
+
+  _onClose(code) {
+    console.warn(`[JSCORD] ⚠️ Gateway closed (${code}). Reconnecting...`);
+    clearInterval(this.heartbeatInterval);
+    setTimeout(() => this.login(), this.reconnectDelay);
   }
 
   _identify() {
@@ -80,7 +113,7 @@ export class Client {
       op: 2,
       d: {
         token: this.token,
-        intents: 513, // GUILDS + GUILD_MESSAGES
+        intents: this.intents,
         properties: {
           os: "linux",
           browser: "jscord",
@@ -88,7 +121,6 @@ export class Client {
         },
       },
     };
-
     this.ws.send(JSON.stringify(payload));
     console.log("[JSCORD] 🪪 Sent IDENTIFY payload");
   }
@@ -99,7 +131,7 @@ export class Client {
       () => this._sendHeartbeat(),
       interval
     );
-    console.log(`[JSCORD] ❤️ Heartbeat started every ${interval}ms`);
+    console.log(`[JSCORD] ❤️ Heartbeat started (${interval}ms)`);
   }
 
   _sendHeartbeat() {
@@ -108,14 +140,11 @@ export class Client {
     }
   }
 
-  _onClose(code) {
-    console.warn(`[JSCORD] ⚠️ Gateway closed (${code}). Reconnecting...`);
-    clearInterval(this.heartbeatInterval);
-    setTimeout(() => this.login(), 5000);
-  }
-
   async sendMessage(channelId, content) {
     try {
+      const body =
+        typeof content === "string" ? { content } : { ...content };
+
       const res = await fetch(
         `https://discord.com/api/v10/channels/${channelId}/messages`,
         {
@@ -124,13 +153,13 @@ export class Client {
             "Content-Type": "application/json",
             Authorization: `Bot ${this.token}`,
           },
-          body: JSON.stringify({ content }),
+          body: JSON.stringify(body),
         }
       );
 
       const data = await res.json();
-      if (res.status !== 200 && res.status !== 201)
-        console.error(`[JSCORD] ⚠️ Send failed:`, data);
+      if (!res.ok)
+        console.error(`[JSCORD] ⚠️ Send failed (${res.status}):`, data);
       return data;
     } catch (err) {
       console.error("[JSCORD] Send Message Error:", err.message);
